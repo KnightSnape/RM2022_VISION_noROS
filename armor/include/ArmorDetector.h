@@ -57,8 +57,6 @@ private:
     //sol
     Kalmanfilter kalman;
 
-    BUFF buff;
-
     float offset_x;
     float offset_y;
 
@@ -69,14 +67,19 @@ private:
 
 public:
 
+    int cnt = 0;
     //get
     Robotstatus robotstatus;
     //send
     RobotCMD robotcmd;
 
+    std::shared_ptr<BUFF> buff;
+
     ArmorDetector(CommPort &c);
 
     ~ArmorDetector();
+
+    void load_param(Robotstatus &status);
 
     void sendArmor();
 

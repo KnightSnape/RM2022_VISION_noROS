@@ -3,11 +3,8 @@
 Trajectory::Trajectory()
 {
     max_iter = 10;
-
     stop_error = 0.001;
-
     R_K_iter = 60;
-
     std::string path = "../config/config.yaml";
     YAML::Node Config = YAML::LoadFile(path);
     int state = Config["test"]["state"].as<int>();
@@ -27,6 +24,8 @@ double Trajectory::TrajectoryCal(Matrix31d &xyz)
     xyz[0] /= 100.0f;
     xyz[1] /= 100.0f;
     xyz[2] /= 100.0f;
+
+    //std::cout<<xyz.transpose()<<std::endl;
 
     auto dist_vertical = xyz[1];
     auto vertical_tmp = dist_vertical;
@@ -76,6 +75,7 @@ double Trajectory::TrajectoryCal(Matrix31d &xyz)
             pitch_new = atan(vertical_tmp / dist_horizonal) * 180 / PI;
         }
     }
+    //std::cout<<pitch_new<<std::endl;
     return (pitch_new - pitch) / 180 * PI;
 }
 

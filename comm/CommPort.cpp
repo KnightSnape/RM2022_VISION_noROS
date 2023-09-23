@@ -3,10 +3,6 @@
 CommPort::CommPort() 
 {
     char *device = "/dev/ttyAAA0";
-    if (FOR_PC)
-        device = "/dev/ttyAAA0";
-    else    
-        device = "/dev/ttyAAA0";
 
     logger_ = spdlog::get("cv_program_logger");
     port_.setPort(device);

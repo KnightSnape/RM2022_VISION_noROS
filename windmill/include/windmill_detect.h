@@ -1,53 +1,74 @@
-#ifndef MINDVERSIONCALL_WINDMILL_H
-#define MINDVERSIONCALL_WINDMILL_H
-#include <iostream>
+#pragma once
+#include <vector>
+#include <string>
 #include <cmath>
-#include <algorithm>
-#include <cstring>
-#include <queue>
-#include <opencv2/opencv.hpp>
+#include <cstdlib>
+#include <cassert>
+#include <cfloat>
+#include <fstream>
+#include <iostream>
 #include <memory>
+#include <sstream>
+#include <sys/types.h>
+#include <opencv2/opencv.hpp>
+#include <opencv2/core/core.hpp>
+#include <opencv2/dnn/dnn.hpp>
+#include <openvino/openvino.hpp>
 #include <inference_engine.hpp>
-#include <Eigen/Eigen>
-#include "../../others/GlobalParams.h"
 
-using namespace cv;
-using namespace std;
 using namespace InferenceEngine;
 
-struct BuffObject
-{
-    Point2f apex[5];
-    cv::Rect_<float> rect;
-    int cls;
-    int color;
-    float prob;
-    std::vector<cv::Point2f> pts;
-};
+#define NMS_THRESHOLD 0.25f
+#define CONF_THRESHOLD 0.45f
+#define IMG_SIZE 416
+#define ANCHOR 3 //anchor 数量
+#define DEVICE "GPU"
+//#define VIDEO
+#define KPT_NUM 5
+#define CLS_NUM 4
 
-struct GridAndStride
-{
-    int grid0;
-    int grid1;
-    int stride;
-};
-class BuffDetector
+class buff_kpt
 {
     public:
-        BuffDetector();
-        ~BuffDetector();
-        bool detect(Mat &src,vector<BuffObject>& objects,Robotstatus &robotstatus);
-        bool initModel(string path);
-    private:
-        Core ie;
-        CNNNetwork network;                // 网络
-        ExecutableNetwork executable_network;       // 可执行网络
-        InferRequest infer_request;      // 推理请求
-        MemoryBlob::CPtr moutput;
-        string input_name;
-        string output_name;
-    
-        Eigen::Matrix<float,3,3> transfrom_matrix;
+        buff_kpt();
 
+        struct Object {
+            cv::Rect_<float> rect;
+            int label;
+            float prob;
+            std::vector<cv::Point2f> kpt;
+            cv::Point2f center;
+            cv::Point2f center_R;
+        };
+        void load_params(std::string model_path);
+
+        cv::Mat letter_box(cv::Mat &src, int h, int w, std::vector<float> &padd);
+
+        std::vector<cv::Point2f>
+        scale_box_kpt(std::vector<cv::Point2f> points, std::vector<float> &padd, float raw_w, float raw_h, int idx);
+
+        cv::Rect scale_box(cv::Rect box, std::vector<float> &padd, float raw_w, float raw_h);
+
+        void drawPred(int classId, float conf, cv::Rect box, std::vector<cv::Point2f> point, cv::Mat &frame,
+                    const std::vector<std::string> &classes);
+
+        static void generate_proposals(int stride, const float *feat, std::vector<Object> &objects);
+
+        std::vector<Object> work(cv::Mat src_img);
+
+    private:
+        ov::Core core;
+        std::shared_ptr<ov::Model> model;
+        ov::CompiledModel compiled_model;
+        ov::InferRequest infer_request;
+        ov::Tensor input_tensor1;
+
+        const std::vector<std::string> class_names = {
+             "RR", "RW", "BR", "BW"
+        };
+
+        static float sigmoid(float x)
+        {
+            return static_cast<float>(1.f / (1.f + exp(-x)));
+        }
 };
-#endif //MINDVERSIONCALL_WINDMILL_H

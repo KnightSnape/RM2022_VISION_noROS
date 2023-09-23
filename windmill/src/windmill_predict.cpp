@@ -1,6 +1,6 @@
 #include"windmill_predict.h"
 
-BuffPredictor::BuffPredictor() {
+Buff_Predictor::Buff_Predictor() {
     is_params_confirmed = false;
     params[0] = 0;
     params[1] = 0;
@@ -11,11 +11,11 @@ BuffPredictor::BuffPredictor() {
     pf_param_loader.initParam(config, "buff");
 }
 
-BuffPredictor::~BuffPredictor() {
+Buff_Predictor::~Buff_Predictor() {
 
 }
 
-bool BuffPredictor::predict(double speed, double dist, int timestamp, double &result) {
+bool Buff_Predictor::predict(double speed, double dist, int timestamp, double &result) {
     auto t1 = std::chrono::steady_clock::now();
     TargetInfo target = {speed, dist, timestamp};
     if (mode != last_mode)//change
@@ -58,30 +58,36 @@ bool BuffPredictor::predict(double speed, double dist, int timestamp, double &re
         else
             deque_len = history_deque_len_phase;
     }
-
-    if (history_info.size() < deque_len) {
-        history_info.push_back(target);
-        last_target = target;
-        return false;
-    } else if (history_info.size() == deque_len) {
-        history_info.pop_front();
-        history_info.push_back(target);
-    } else if (history_info.size() > deque_len) {
-        while (history_info.size() >= deque_len) {
-            history_info.pop_front();
-        }
-        history_info.push_back(target);
-    }
-
-    double rotate_speed_sum = 0;
+    double rotate_speed_sum;
     int rotate_sign;
-    for (auto target_info: history_info) {
-        rotate_speed_sum += target_info.speed;
+    double mean_velocity;
+    if(mode == 1)
+    {
+        if (history_info.size() < deque_len) {
+            history_info.push_back(target);
+            last_target = target;
+            return false;
+        } else if (history_info.size() == deque_len) {
+            history_info.pop_front();
+            history_info.push_back(target);
+        } else if (history_info.size() > deque_len) {
+            while (history_info.size() >= deque_len) {
+                history_info.pop_front();
+            }
+            history_info.push_back(target);
+        }
+
+        rotate_speed_sum = 0;
+        rotate_sign;
+        for (auto target_info: history_info) {
+            rotate_speed_sum += target_info.speed;
+        }
+        mean_velocity = rotate_speed_sum / history_info.size();
     }
-    auto mean_velocity = rotate_speed_sum / history_info.size();
+
 
     if (mode == 0) {
-        params[3] = mean_velocity;
+        params[3] = 1.0;
     } else if (mode == 1) {
         if (!is_params_confirmed) {
             ceres::Problem problem;
@@ -164,11 +170,6 @@ bool BuffPredictor::predict(double speed, double dist, int timestamp, double &re
             cout << "RMSE:" << new_rmse << endl;
         }
     }
-    if (DEBUG) {
-        for (auto param: params)
-            cout << param << " ";
-        cout << "\n" << "------------" << endl;
-    }
     int delay = (mode == 1 ? delay_big : delay_small);
 
     float delta_time_estimate = ((double) dist / bullet_speed) * 1e3 + delay;
@@ -185,12 +186,12 @@ bool BuffPredictor::predict(double speed, double dist, int timestamp, double &re
     return true;
 }
 
-bool BuffPredictor::setBulletSpeed(double speed) {
+bool Buff_Predictor::setBulletSpeed(double speed) {
     bullet_speed = speed;
     return true;
 }
 
-double BuffPredictor::calcAimingAngleOffset(double params[4], double t0, double t1, int mode) {
+double Buff_Predictor::calcAimingAngleOffset(double params[4], double t0, double t1, int mode) {
     auto a = params[0];
     auto omega = params[1];
     auto theta = params[2];
@@ -213,7 +214,7 @@ double BuffPredictor::calcAimingAngleOffset(double params[4], double t0, double 
     return theta1 - theta0;
 }
 
-double BuffPredictor::evalRMSE(double params[4]) {
+double Buff_Predictor::evalRMSE(double params[4]) {
     double rmse_sum = 0;
     double rmse = 0;
     for (auto target_info: history_info) {

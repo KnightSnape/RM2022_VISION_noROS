@@ -12,6 +12,7 @@ bool areacmp(const armor_detect_yolo::Object &a,const armor_detect_yolo::Object 
 extern std::chrono::steady_clock::time_point e1;
 Kalmanfilter::Kalmanfilter()
 {
+
     // 30
     F_MAT = (cv::Mat_<double>(3, 3)
             << 1364.533879, 0.000000, 324.296573,
@@ -88,7 +89,7 @@ void Kalmanfilter::initParams(bool update_all)
     ekf.R(1,1) = Config["R11"].as<float>();
     ekf.R(2,2) = Config["R22"].as<float>();
 
-    if(update_all)
+    if(update_all && !is_antitop)
     {
         ekf.Q(0,0) = Config["Q00_AC"].as<float>();
         ekf.Q(1,1) = Config["Q11_AC"].as<float>();
@@ -99,6 +100,32 @@ void Kalmanfilter::initParams(bool update_all)
         ekf.R(0.0) = Config["R00"].as<float>();
         ekf.R(1,1) = Config["R11"].as<float>();
         ekf.R(2,2) = Config["R22"].as<float>();
+    }
+
+    if(is_antitop)
+    {
+        ekf.Q(0,0) = Config["Q00_ANTI"].as<float>();
+        ekf.Q(1,1) = Config["Q11_ANTI"].as<float>();
+        ekf.Q(2,2) = Config["Q22_ANTI"].as<float>();
+        ekf.Q(3,3) = Config["Q33_ANTI"].as<float>();
+        ekf.Q(4,4) = Config["Q44_ANTI"].as<float>();
+
+        ekf.R(0,0) = Config["R00_ANTI"].as<float>();
+        ekf.R(1,1) = Config["R11_ANTI"].as<float>();
+        ekf.R(2,2) = Config["R22_ANTI"].as<float>();
+
+        if(update_all)
+        {
+            ekf.Q(0,0) = Config["Q00_ANTI_AC"].as<float>();
+            ekf.Q(1,1) = Config["Q11_ANTI_AC"].as<float>();
+            ekf.Q(2,2) = Config["Q22_ANTI_AC"].as<float>();
+            ekf.Q(3,3) = Config["Q33_ANTI_AC"].as<float>();
+            ekf.Q(4,4) = Config["Q44_ANTI_AC"].as<float>();
+
+            ekf.R(0,0) = Config["R00_ANTI_AC"].as<float>();
+            ekf.R(1,1) = Config["R11_ANTI_AC"].as<float>();
+            ekf.R(2,2) = Config["R22_ANTI_AC"].as<float>();
+        }
     }
 
 }
@@ -172,6 +199,17 @@ bool Kalmanfilter::predict(RobotCMD& send, cv::Mat& im_show, Robotstatus& getdat
     Object.clear();
     auto t0 = std::chrono::steady_clock::now();
     vector<Armor> armors;
+    bullet_speed = getdata.robot_speed;
+    trajectory.getSpeed(getdata.robot_speed);
+    //Object_new = kpt.work(im_show);
+    //if(Object_new.empty())
+    //{
+    //    std::cout<<"No object"<<std::endl;
+   //     is_last_target_exists = false;
+    //    send.target_id = (uint8_t)0;
+    //    return false;
+    //}
+
     if(!yolo.work(im_show,Object))
     {
         std::cout<<"No object"<<std::endl;
@@ -188,14 +226,11 @@ bool Kalmanfilter::predict(RobotCMD& send, cv::Mat& im_show, Robotstatus& getdat
     if(Object.size() > armor_max_cnt)
         Object.resize(armor_max_cnt);
 
-    std::cout<<"status color"<<(int)getdata.color<<std::endl;
-
     for(auto object:Object)
     {
         Armor armor;
         armor.id = get_id(object.label);
         armor.color = get_color(object.label);
-        std::cout<<armor.color;
         armor.conf = object.prob;
         if(armor.color == (int)ColorChoose::BLUE)
         {
@@ -313,58 +348,125 @@ bool Kalmanfilter::predict(RobotCMD& send, cv::Mat& im_show, Robotstatus& getdat
         {
             target = armor;
             found_target = true;
+            is_target_switched = true;
         }
     }
 
     if(!found_target)
     {
         is_last_target_exists = false;
+        is_target_switched = true;
         std::cout<<"Not correct target"<<std::endl;
         return false;
     }
 
     Predict predictfunc;
     Measure measure;
+    Antitop_Delay delay;
+//    std::cout<<target.center3d_world.transpose()<<std::endl;
     re_project_point(im_show,target.center3d_world,R_IW,cv::Scalar(255,255,0));
+//    std::cout<<bullet_speed<<std::endl;
 
-    if(is_target_switched)
+//    if(is_target_switched)
+//        std::cout<<"BRRRRRRRRRRRRRRRR"<<std::endl;
+
+    if(target_id == 6)
+	is_antitop = true;
+    else
+	is_antitop = false;
+    float velocity = 0.0;
+    if(!is_antitop)
     {
-        initParams(false);
-        Eigen::Matrix<double,5,1> Xr;
-        Xr << target.center3d_world[0],0,target.center3d_world[1],0,target.center3d_world[2];
-        ekf.init(Xr);
+        if(is_target_switched)
+        {
+            initParams(false);
+            Eigen::Matrix<double,5,1> Xr;
+            Xr << target.center3d_world[0],0,target.center3d_world[1],0,target.center3d_world[2];
+            ekf.init(Xr);
+        }
+        else
+        {
+            Eigen::Matrix<double, 5, 1> Xr;
+            Xr << target.center3d_world[0],0,target.center3d_world[1],0,target.center3d_world[2];
+            Eigen::Matrix<double, 3, 1> Yr;
+            measure(Xr.data(), Yr.data());// 转化成相机求坐标系 Yr
+            predictfunc.delta_t = Delta_T / 1e3;//设置距离上次预测的时间
+            ekf.predict(predictfunc);
+            Eigen::Matrix<double,5,1> Xe = ekf.update(measure,Yr); 
+            double predict_time = target.center3d_world.norm() / bullet_speed / 2 + shoot_delay - 0.01;
+            predictfunc.delta_t = predict_time;
+            Eigen::Matrix<double,5,1> Xp;
+            predictfunc(Xe.data(),Xp.data());
+
+            Eigen::Vector3d c_pw{Xe(0,0),Xe(2,0),Xe(4,0)};
+            target.center3d_world[0] = Xp(0,0);
+            target.center3d_world[1] = Xp(2,0);
+            target.center3d_world[2] = Xp(4,0);
+        }
     }
     else
     {
-        Eigen::Matrix<double, 5, 1> Xr;
-        Xr << target.center3d_world[0],0,target.center3d_world[1],0,target.center3d_world[2];
-        Eigen::Matrix<double, 3, 1> Yr;
-        measure(Xr.data(), Yr.data());// 转化成相机求坐标系 Yr
-        predictfunc.delta_t = Delta_T / 1e3;// 设置距离上次预测的时间
-        ekf.predict(predictfunc);
-        Eigen::Matrix<double,5,1> Xe = ekf.update(measure,Yr); 
-        double predict_time = target.center3d_world.norm() / bullet_speed + shoot_delay;
-        predictfunc.delta_t = predict_time;
-        Eigen::Matrix<double,5,1> Xp;
-        predictfunc(Xe.data(),Xp.data());
+        if(is_target_switched)
+        {
+            initParams(false);
+            Eigen::Matrix<double,5,1> Xr;
+            Xr << target.center3d_world[0],0,target.center3d_world[1],0,target.center3d_world[2];
+            ekf.init(Xr);
+        }
+        else
+        {
+            Eigen::Matrix<double, 5, 1> Xr;
+            Xr << target.center3d_world[0],0,target.center3d_world[1],0,target.center3d_world[2];
+            Eigen::Matrix<double, 3, 1> Yr;
+            measure(Xr.data(), Yr.data());// 转化成相机求坐标系 Yr
+            predictfunc.delta_t = Delta_T / 1e3;//设置距离上次预测的时间
+            ekf.predict(predictfunc);
+            Eigen::Matrix<double,5,1> Xe = ekf.update(measure,Yr);
+            //Xe(1,0) = -Xe(1,0);
+	    //Xe(3,0) = -Xe(3,0);
 
-        Eigen::Vector3d c_pw{Xe(0,0),Xe(2,0),Xe(4,0)};
-        target.center3d_world[0] = Xp(0,0);
-        target.center3d_world[1] = Xp(2,0);
-        target.center3d_world[2] = Xp(4,0);
+	    if(Xe(1.0) > 0.1)
+                Xe(1.0) = 0.1;
+            if(Xe(1.0) < -0.1)
+                Xe(1,0) = -0.1;
+            if(Xe(3,0) > 0.1)
+                Xe(3,0) = 0.1;
+            if(Xe(3,0) < -0.1)
+                Xe(3,0) = -0.1;
+            double predict_time = target.center3d_world.norm() / bullet_speed / 3.2 + shoot_delay - 0.018;
+            predictfunc.delta_t = predict_time;
+            Eigen::Matrix<double,5,1> Xp;
+            predictfunc(Xe.data(),Xp.data());
+
+            Eigen::Vector3d c_pw{Xe(0,0),Xe(2,0),Xe(4,0)};
+            target.center3d_world[0] = Xp(0,0);
+            target.center3d_world[1] = Xp(2,0);
+            target.center3d_world[2] = Xp(4,0);
+        }
     }
-    re_project_point(im_show,target.center3d_world,R_IW,cv::Scalar(0,255,255));
-    target.center3d_cam = pw_to_pc(target.center3d_world,R_IW);
+//    std::cout<<velocity<<std::endl;
 
+    //target.center3d_world = pc_to_pw(target.center3d_cam,R_IW);
+    //re_project_point(im_show,target.center3d_world,R_IW,cv::Scalar(0,255,255));
+    auto target_center_cam = pw_to_pc(target.center3d_world,R_IW);
+    if(is_antitop)
+    target.center3d_cam << target_center_cam[0],target.center3d_cam[1],target_center_cam[2];
+    else
+    target.center3d_cam << target_center_cam[0],target_center_cam[1],target_center_cam[2];
+
+    target.center3d_world = pc_to_pw(target.center3d_cam,R_IW);
+    re_project_point(im_show,target.center3d_world,R_IW,cv::Scalar(0,255,0));
+//    std::cout<<target.center3d_world.transpose()<<std::endl;
+//   std::cout<<target.center3d_cam.transpose()<<std::endl;
     last_armor = target;
     is_last_target_exists = true;
     double s_yaw = atan(-target.center3d_cam(0, 0) / target.center3d_cam(2, 0));
     double s_pitch = atan(-target.center3d_cam(1, 0) / target.center3d_cam(2, 0));
 
-// //    std::cout<<frames_info.size()<<std::endl;
+//    std::cout<<bullet_speed<<std::endl;
 
-  //  cv::imshow("1",im_show);
-  //  cv::waitKey(1);
+//    cv::imshow("1",im_show);
+//    cv::waitKey(1);
 
 // //    cout<<getdata.yaw<<" "<<getdata.pitch<<endl;
     send.yaw_angle = (float)(s_yaw);

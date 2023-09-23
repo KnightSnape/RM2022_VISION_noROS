@@ -9,7 +9,7 @@ using namespace cv;
 
 const string pf_path = "../config/predict.yaml";
 
-class BuffPredictor {
+class Buff_Predictor {
 private:
     struct CURVE_FITTING_COST {
         CURVE_FITTING_COST(double x, double y) : _x(x), _y(y) {}
@@ -68,9 +68,9 @@ private:
 
 public:
 
-    BuffPredictor();
+    Buff_Predictor();
 
-    ~BuffPredictor();
+    ~Buff_Predictor();
 
     bool predict(double speed, double dist, int timestamp, double &result);
 

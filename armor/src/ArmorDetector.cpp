@@ -4,11 +4,20 @@ std::chrono::steady_clock::time_point e1;
 
 ArmorDetector::ArmorDetector(CommPort &c) : comm(c) 
 {
+    buff = std::make_shared<BUFF>();
+    e1 = std::chrono::steady_clock::now();
+    buff->set_start_time(e1);
+}
+
+ArmorDetector::~ArmorDetector() = default;
+
+void ArmorDetector::load_param(Robotstatus &status)
+{
     std::string path = "../config/config.yaml";
     YAML::Node Config = YAML::LoadFile(path);
 
-    int state = Config["test"]["state"].as<int>();
-    if(state == 0)
+    float bullet_speed = robotstatus.robot_speed;
+    if(bullet_speed <= 18.0)
     {
         offset_x = Config["test"]["low_speed_offset_x"].as<float>();
         offset_y = Config["test"]["low_speed_offset_y"].as<float>();
@@ -20,21 +29,27 @@ ArmorDetector::ArmorDetector(CommPort &c) : comm(c)
     }
 }
 
-ArmorDetector::~ArmorDetector() = default;
-
 void ArmorDetector::run(cv::Mat &img_src) {
+
+    cnt++;
     comm.Turnstatus(robotstatus);
+    load_param(robotstatus);
     cmd_start();
     std::chrono::steady_clock::time_point e2 = std::chrono::steady_clock::now();
     double final = std::chrono::duration<double, std::milli>(e2 - e1).count();
+//    robotstatus.vision = Vision::WINDBIG;
+    std::cout<<"vision is:"<<(int)robotstatus.vision<<std::endl;
     robotstatus.timestamp = (int) (final);
-    bool have = kalman.predict(robotcmd, img_src, robotstatus);
 //    if (FOR_PC)
 //        robotstatus.vision == Vision::CLASSIC;
-//    if (robotstatus.vision == Vision::CLASSIC || robotstatus.vision == Vision::SENTLY) {
-//        bool have = kalman.predict(robotcmd, img_src, robotstatus);
-//    } else if (robotstatus.vision == Vision::WINDSMALL || robotstatus.vision == Vision::WINDBIG) {
-//        bool have = buff.run(img_src, robotstatus, robotcmd);
+    bool have = false;
+    if (robotstatus.vision == Vision::CLASSIC || robotstatus.vision == Vision::SENTLY) {
+        have = kalman.predict(robotcmd, img_src, robotstatus);
+    } else if (robotstatus.vision == Vision::WINDSMALL || robotstatus.vision == Vision::WINDBIG) {
+        have = buff->run(robotstatus, robotcmd,img_src);
+    }
+    if(!have)
+	return;
 //    } else {
 //        cout << "[Error]Vision is wrong" << endl;
 //        exit(-1);
@@ -48,6 +63,7 @@ void ArmorDetector::sendArmor() {
 }
 
 void ArmorDetector::sendData() {
+    
     packet[0] = 0x5A;
     if (robotcmd.priority == Priority::CORE) packet[1] = 0;
     if (robotcmd.priority == Priority::DANGER) packet[1] = 1;
@@ -57,8 +73,21 @@ void ArmorDetector::sendData() {
         uint8_t raw[4];
     } tx_x{}, tx_y{};
 
-    tx_x.actual = robotstatus.pitch + (float) robotcmd.pitch_angle + offset_x;
-    tx_y.actual = robotstatus.yaw + (float) robotcmd.yaw_angle + offset_y;
+    float x_offset = -0.24;
+    float y_offset = 0.00;
+
+    if(robotstatus.vision == Vision::CLASSIC)
+    {
+        x_offset = 0.00;
+        y_offset = 0.00;
+    }
+    else
+    {
+	x_offset = 0.0;
+        y_offset = 0.0;
+    }
+    tx_x.actual = robotstatus.pitch + (float) robotcmd.pitch_angle + offset_x + x_offset;
+    tx_y.actual = robotstatus.yaw + (float) robotcmd.yaw_angle + offset_y + y_offset;
 
     for (int i = 0; i < 4; i++) {
         packet[2 + i] = tx_x.raw[i];  // x

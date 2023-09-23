@@ -5,8 +5,8 @@ set(CMAKE_EXE_LINKER_FLAGS
         -I$(GENICAM_ROOT_V2_3)/library/CPP/include
         -I$(DAHENG_ROOT)/sdk/include
         )
-set(ngraph_DIR "/opt/intel/openvino_2022/runtime/cmake")
-set(InferenceEngine_DIR "/opt/intel/openvino_2022/runtime/cmake")
+set(ngraph_DIR "/opt/intel/openvino_2023/runtime/cmake")
+set(InferenceEngine_DIR "/opt/intel/openvino_2023/runtime/cmake")
 
 find_package(OpenCV 4 REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -20,8 +20,8 @@ find_package(yaml-cpp REQUIRED)
 
 include_directories(
         #OpenVINO推理引擎的头文件
-        /opt/intel/openvino_2022/runtime/include/ie/
-        /opt/intel/openvino_2022/runtime/include/ngraph/
+        /opt/intel/openvino_2023/runtime/include/ie/
+        /opt/intel/openvino_2023/runtime/include/ngraph/
 )
 include_directories(
         ${OpenCV_LIBRARY_DIRS}

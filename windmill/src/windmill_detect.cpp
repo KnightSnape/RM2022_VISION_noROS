@@ -1,368 +1,310 @@
-#include "../include/windmill_detect.h"
-#include "../camera//include/camera/CamWrapperDH.h"
+#include"windmill_detect.h"
 
-#define INF 0x3f3f3f3f
-
-static constexpr int INPUT_W = 416;    // Width of input
-static constexpr int INPUT_H = 416;    // Height of input
-static constexpr int NUM_CLASSES = 2;  // Number of classes
-static constexpr int NUM_COLORS = 2;   // Number of color
-static constexpr int TOPK = 128;       // TopK 堆排序的前128个
-static constexpr float NMS_THRESH = 0.1; //神经网络NMS系数
-static constexpr float BBOX_CONF_THRESH = 0.6; //置信度系数
-static constexpr float MERGE_CONF_ERROR = 0.15; //最大错误系数
-static constexpr float MERGE_MIN_IOU = 0.2; //IOU最低置信度
-
-static inline int argmax(const float *ptr, int len) //找最大值的函数
+buff_kpt::buff_kpt()
 {
-    int max_arg = 0;
-    for (int i = 1; i < len; i++) {
-        if (ptr[i] > ptr[max_arg])
-            max_arg = i;
-    }
-    return max_arg;
+
 }
 
-inline cv::Mat scaledResize(cv::Mat &img, Eigen::Matrix<float, 3, 3> &transform_matrix) //神经网络预处理缩放函数
+void buff_kpt::load_params(std::string model_path)
 {
-    //先把图像缩放成长为416，根据同比例缩放宽 249，然后两侧插入纯黑的边框，把宽拉伸到416,使得图片比例正常，然后以416*416分辨率给神经网络
-    float r = std::min(INPUT_W / (img.cols * 1.0), INPUT_H / (img.rows * 1.0));
-    int unpad_w = r * img.cols; //416
-    int unpad_h = r * img.rows; //249
-    int dw = INPUT_W - unpad_w;
-    int dh = INPUT_H - unpad_h;
-    dw /= 2;  //0
-    dh /= 2;  //83
-    transform_matrix << 1.0 / r, 0, -dw / r,
-            0, 1.0 / r, -dh / r,
-            0, 0, 1;
-    Mat re, out;
-    cv::resize(img, re, Size(unpad_w, unpad_h));
-    cv::copyMakeBorder(re, out, dh, dh, dw, dw, BORDER_CONSTANT);
-    return out;
+    model = core.read_model(model_path);
+    std::shared_ptr<ov::Model> model = core.read_model(model_path);
+    compiled_model = core.compile_model(model, DEVICE);
+    std::map<std::string, std::string> config = {
+            {InferenceEngine::PluginConfigParams::KEY_PERF_COUNT, InferenceEngine::PluginConfigParams::YES}};
+    infer_request = compiled_model.create_infer_request();
+    input_tensor1 = infer_request.get_input_tensor(0);
 }
 
-static void generate_grids_and_stride(const int target_w, const int target_h,
-                                      std::vector<int> &strides, std::vector<GridAndStride> &grid_strides) {
-    for (auto stride: strides) {
-        int num_grid_w = target_w / stride;
-        int num_grid_h = target_h / stride;
-        for (int g1 = 0; g1 < num_grid_h; g1++) {
-            for (int g0 = 0; g0 < num_grid_w; g0++) {
-                grid_strides.push_back((GridAndStride) {g0, g1, stride});
-            }
-        }
+cv::Mat buff_kpt::letter_box(cv::Mat &src, int h, int w, std::vector<float> &padd) {
+    int in_w = src.cols;
+    int in_h = src.rows;
+    int tar_w = w;
+    int tar_h = h;
+    float r = std::min(float(tar_h) / in_h, float(tar_w) / in_w);
+    int inside_w = round(in_w * r);
+    int inside_h = round(in_h * r);
+    int padd_w = tar_w - inside_w;
+    int padd_h = tar_h - inside_h;
+    cv::Mat resize_img;
+    resize(src, resize_img, cv::Size(inside_w, inside_h));
+    padd_w = padd_w / 2;
+    padd_h = padd_h / 2;
+    padd.push_back(padd_w);
+    padd.push_back(padd_h);
+    padd.push_back(r);
+    int top = int(round(padd_h - 0.1));
+    int bottom = int(round(padd_h + 0.1));
+    int left = int(round(padd_w - 0.1));
+    int right = int(round(padd_w + 0.1));
+    copyMakeBorder(resize_img, resize_img, top, bottom, left, right, 0, cv::Scalar(114, 114, 114));
+    return resize_img;
+}
+
+cv::Rect buff_kpt::scale_box(cv::Rect box, std::vector<float> &padd, float raw_w, float raw_h) {
+    cv::Rect scaled_box;
+    scaled_box.width = box.width / padd[2];
+    scaled_box.height = box.height / padd[2];
+    scaled_box.x = std::max(std::min((float) ((box.x - padd[0]) / padd[2]), (float) (raw_w - 1)), 0.f);
+    scaled_box.y = std::max(std::min((float) ((box.y - padd[1]) / padd[2]), (float) (raw_h - 1)), 0.f);
+    return scaled_box;
+}
+
+std::vector<cv::Point2f>
+buff_kpt::scale_box_kpt(std::vector<cv::Point2f> points, std::vector<float> &padd, float raw_w, float raw_h, int idx) {
+    std::vector<cv::Point2f> scaled_points;
+    for (int ii = 0; ii < KPT_NUM; ii++) {
+        points[idx * KPT_NUM + ii].x = std::max(
+                std::min((points[idx * KPT_NUM + ii].x - padd[0]) / padd[2], (float) (raw_w - 1)), 0.f);
+        points[idx * KPT_NUM + ii].y = std::max(
+                std::min((points[idx * KPT_NUM + ii].y - padd[1]) / padd[2], (float) (raw_h - 1)), 0.f);
+        scaled_points.push_back(points[idx * KPT_NUM + ii]);
+
     }
+    return scaled_points;
 }
 
+void buff_kpt::drawPred(int classId, float conf, cv::Rect box, std::vector<cv::Point2f> point, cv::Mat &frame,
+                        const std::vector<std::string> &classes) { //画图部分
+    float x0 = box.x;
+    float y0 = box.y;
+    float x1 = box.x + box.width;
+    float y1 = box.y + box.height;
+    cv::rectangle(frame, cv::Point(x0, y0), cv::Point(x1, y1), cv::Scalar(255, 255, 255), 1);
 
-static void generateYoloxProposals(std::vector<GridAndStride> grid_strides, const float *feat_ptr,
-                                   Eigen::Matrix<float, 3, 3> &transform_matrix, float prob_threshold,
-                                   std::vector<BuffObject> &objects) {
-    const int num_anchors = grid_strides.size(); //这个和yolov5的anchor不一样，这是自由anchor，数量很大
-    //Travel all the anchors
-    for (int anchor_idx = 0; anchor_idx < num_anchors; anchor_idx++) {
-        const int grid0 = grid_strides[anchor_idx].grid0;
-        const int grid1 = grid_strides[anchor_idx].grid1;
-        const int stride = grid_strides[anchor_idx].stride;
-
-        const int basic_pos = anchor_idx * (11 + NUM_COLORS + NUM_CLASSES);
-        //11怎么来的不知道（估计是因为一个扇叶包含是11个信息，10个坐标信息和一个颜色信息）
-
-        // yolox/models/yolo_head.py decode logic
-        //  outputs[..., :2] = (outputs[..., :2] + grids) * strides
-        //  outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides
-        float x_1 = (feat_ptr[basic_pos + 0] + grid0) * stride;
-        float y_1 = (feat_ptr[basic_pos + 1] + grid1) * stride;
-        float x_2 = (feat_ptr[basic_pos + 2] + grid0) * stride;
-        float y_2 = (feat_ptr[basic_pos + 3] + grid1) * stride;
-        float x_3 = (feat_ptr[basic_pos + 4] + grid0) * stride;
-        float y_3 = (feat_ptr[basic_pos + 5] + grid1) * stride;
-        float x_4 = (feat_ptr[basic_pos + 6] + grid0) * stride;
-        float y_4 = (feat_ptr[basic_pos + 7] + grid1) * stride;
-        float x_5 = (feat_ptr[basic_pos + 8] + grid0) * stride;
-        float y_5 = (feat_ptr[basic_pos + 9] + grid1) * stride;
-        //这里五个点是扇叶的四个边界和扇叶尾端（中心点位置）
-
-        int box_color = argmax(feat_ptr + basic_pos + 11, NUM_COLORS); //检测的颜色，红色为1，蓝色为2？
-        int box_class = argmax(feat_ptr + basic_pos + 11 + NUM_COLORS, NUM_CLASSES); //编号
-        float box_objectness = (feat_ptr[basic_pos + 10]);
-
-        float color_conf = (feat_ptr[basic_pos + 11 + box_color]);  //颜色置信度
-        float cls_conf = (feat_ptr[basic_pos + 11 + NUM_COLORS + box_class]); //框置信度
-
-        // cout<<box_objectness<<endl;
-        // float box_prob = (box_objectness + cls_conf + color_conf) / 3.0;
-        float box_prob = box_objectness;
-        if (box_prob >= prob_threshold) {
-            BuffObject obj;
-            Eigen::Matrix<float, 3, 5> apex_norm;
-            Eigen::Matrix<float, 3, 5> apex_dst;
-            apex_norm << x_1, x_2, x_3, x_4, x_5,
-                    y_1, y_2, y_3, y_4, y_5,
-                    1, 1, 1, 1, 1;
-            apex_dst = transform_matrix * apex_norm;
-            for (int i = 0; i < 5; i++)
-                obj.apex[i] = cv::Point2f(apex_dst(0, i), apex_dst(1, i));
-            for (int i = 0; i < 5; i++) {
-                obj.apex[i] = cv::Point2f(apex_dst(0, i), apex_dst(1, i));
-                obj.pts.push_back(obj.apex[i]);
-            }
-            vector<cv::Point2f> tmp(obj.apex, obj.apex + 5);
-            obj.rect = cv::boundingRect(tmp);
-            obj.cls = box_class;
-            obj.color = box_color;
-            obj.prob = box_prob;
-            objects.push_back(obj);
-        }
-    } // point anchor loop
-}
-
-static inline float intersection_area(const BuffObject &a, const BuffObject &b) {
-    cv::Rect_<float> inter = a.rect & b.rect;
-    return inter.area();
-}
-
-static void qsort_descent_inplace(std::vector<BuffObject> &faceobjects, int left, int right) //下降排序
-{
-    int i = left;
-    int j = right;
-    float p = faceobjects[(left + right) / 2].prob;
-
-    while (i <= j) {
-        while (faceobjects[i].prob > p)
-            i++;
-
-        while (faceobjects[j].prob < p)
-            j--;
-
-        if (i <= j) {
-            // swap
-            std::swap(faceobjects[i], faceobjects[j]);
-
-            i++;
-            j--;
-        }
-    }
-
-#pragma omp parallel sections  //openmp是对sections中的子section分配到不同计算节点进行并行计算
+    cv::Point2f keypoints_center(0, 0);
+    std::vector<bool> valid_keypoints(5, false);
+    for (int i = 0; i < point.size(); i++) 
     {
-#pragma omp section
+        if (i != 2 && point[i].x != 0 && point[i].y != 0) 
         {
-            if (left < j) qsort_descent_inplace(faceobjects, left, j);
-        }
-#pragma omp section
-        {
-            if (i < right) qsort_descent_inplace(faceobjects, i, right);
+            valid_keypoints[i] = true;
         }
     }
-}
 
 
-static void qsort_descent_inplace(std::vector<BuffObject> &objects) {
-    if (objects.empty())
-        return;
-    qsort_descent_inplace(objects, 0, objects.size() - 1);
-}
+    keypoints_center = cv::Point2f(x0 + box.width / 2, y0 + box.height / 2);
 
-static void nms_sorted_bboxes(std::vector<BuffObject> &faceobjects, std::vector<int> &picked,
-                              float nms_threshold)  //NMS算法，去除重叠的框找出最贴切的框
-{
-    picked.clear();
-    const int n = faceobjects.size();
-    std::vector<float> areas(n);
-    for (int i = 0; i < n; i++) {
-        std::vector<cv::Point2f> object_apex_tmp(faceobjects[i].apex, faceobjects[i].apex + 5);
-        areas[i] = contourArea(object_apex_tmp);
-        // areas[i] = faceobjects[i].rect.area();
+    cv::circle(frame, keypoints_center, 2, cv::Scalar(255, 255, 255), 2);
+    
+    for (int i = 0; i < KPT_NUM; i++)
+        if (i == 2)
+            cv::circle(frame, point[i], 4, cv::Scalar(163, 164, 163), 4);
+        else
+            cv::circle(frame, point[i], 3, cv::Scalar(0, 255, 0), 3);
+
+
+    std::string label = cv::format("%.2f", conf);
+    if (!classes.empty()) {
+        CV_Assert(classId < (int) classes.size());
+        label = classes[classId] + ": " + label;
     }
-    for (int i = 0; i < n; i++) {
-        BuffObject &a = faceobjects[i];
-        std::vector<cv::Point2f> apex_a(a.apex, a.apex + 5);
-        int keep = 1;
-        for (int j = 0; j < (int) picked.size(); j++) {
-            BuffObject &b = faceobjects[picked[j]];
-            std::vector<cv::Point2f> apex_b(b.apex, b.apex + 5);
-            std::vector<cv::Point2f> apex_inter;
-            // intersection over union
-            // float inter_area = intersection_area(a, b);
-            // float union_area = areas[i] + areas[picked[j]] - inter_area;
-            //TODO:此处耗时较长，大约1ms，可以尝试使用其他方法计算IOU与多边形面积
-            //IOU计算
-            float inter_area = intersectConvexConvex(apex_a, apex_b, apex_inter);
-            float union_area = areas[i] + areas[picked[j]] - inter_area;
-            float iou = inter_area / union_area;
-            if (iou > nms_threshold || isnan(iou)) {
-                keep = 0;
-                //Stored for Merge
-                if (iou > MERGE_MIN_IOU && abs(a.prob - b.prob) < MERGE_CONF_ERROR
-                    && a.cls == b.cls && a.color == b.color) {
-                    for (int i = 0; i < 5; i++) {
-                        b.pts.push_back(a.apex[i]);
+
+    int baseLine;
+    cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.25, 1, &baseLine);
+    y0 = std::max(int(y0), labelSize.height);
+    cv::rectangle(frame, cv::Point(x0, y0 - round(1.5 * labelSize.height)),
+                  cv::Point(x0 + round(2 * labelSize.width), y0 + baseLine), cv::Scalar(255, 255, 255), cv::FILLED);
+    cv::putText(frame, label, cv::Point(x0, y0), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(), 1.5);
+}
+
+void buff_kpt::generate_proposals(int stride, const float *feat, std::vector<Object> &objects) {
+    int feat_w = IMG_SIZE / stride;
+    int feat_h = IMG_SIZE / stride;
+#if IMG_SIZE == 640
+    float anchors[18] = {11, 10, 19, 15,28, 22, 39, 34, 64, 48, 92, 76, 132, 110, 197, 119,  265, 162}; // 6 4 0
+#elif IMG_SIZE == 416
+    float anchors[18] = {26, 27, 28, 28, 27, 30, 29, 29, 29, 32, 30, 31, 30, 33, 32, 32, 32, 34}; // 4 1 6
+#elif IMG_SIZE == 320
+    float anchors[18] = {6,5, 9,7, 13, 9, 18, 15, 30, 23, 46, 37, 60, 52, 94, 56, 125, 72}; // 3 2 0
+#endif
+    int anchor_group = 0;
+    if (stride == 8)
+        anchor_group = 0;
+    if (stride == 16)
+        anchor_group = 1;
+    if (stride == 32)
+        anchor_group = 2;
+
+    for (int anchor = 0; anchor < ANCHOR; anchor++) { //对每个anchor进行便利
+        for (int i = 0; i < feat_h; i++) { // self.grid[i][..., 0:1]
+            for (int j = 0; j < feat_w; j++) { // self.grid[i][..., 1:2]
+                //每个tensor包含的数据是[x,y,w,h,conf,cls1pro,cls2pro,...clsnpro,kpt1.x,kpt1.y,kpt1.conf,kpt2...kptm.conf]
+                //一共的长度应该是 (5 + CLS_NUM + KPT_NUM * 3)
+                float box_prob = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                      i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                      j * (5 + CLS_NUM + KPT_NUM * 3) + 4];
+                box_prob = sigmoid(box_prob);
+                if (box_prob < CONF_THRESHOLD) continue; // 删除置信度低的bbox
+
+                float kptx[5], kpty[5], kptp[5];
+                // xi,yi,pi 是每个关键点的xy坐标和置信度,最新的代码用不到pi,但是用户可以根据自己需求添加
+                float x = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               j * (5 + CLS_NUM + KPT_NUM * 3) + 0];
+                float y = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               j * (5 + CLS_NUM + KPT_NUM * 3) + 1];
+                float w = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               j * (5 + CLS_NUM + KPT_NUM * 3) + 2];
+                float h = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                               j * (5 + CLS_NUM + KPT_NUM * 3) + 3];
+                if (KPT_NUM != 0)
+                    for (int k = 0; k < KPT_NUM; k++) {
+                        kptx[k] = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                       i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                       j * (5 + CLS_NUM + KPT_NUM * 3) + 5 + CLS_NUM + k * 3];
+                        kpty[k] = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                       i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                       j * (5 + CLS_NUM + KPT_NUM * 3) + 5 + CLS_NUM + k * 3 + 1];
+                        kptp[k] = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                       i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                       j * (5 + CLS_NUM + KPT_NUM * 3) + 5 + CLS_NUM + k * 3 + 2];
+
+                        //对关键点进行后处理(python 代码)
+                        //x_kpt[..., 0::3] = (x_kpt[..., ::3] * 2. - 0.5 + kpt_grid_x.repeat(1, 1, 1, 1, self.nkpt)) * self.stride[i]  # xy
+                        //x_kpt[..., 1::3] = (x_kpt[..., 1::3] * 2. - 0.5 + kpt_grid_y.repeat(1, 1, 1, 1, self.nkpt)) * self.stride[i]  # xy
+                        kptx[k] = (kptx[k] * 2 - 0.5 + j) * stride;
+                        kpty[k] = (kpty[k] * 2 - 0.5 + i) * stride;
                     }
+                double max_prob = 0;
+                int idx = 0;
+                for (int k = 5; k < CLS_NUM + 5; k++) {
+                    double tp = feat[anchor * feat_h * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                     i * feat_w * (5 + CLS_NUM + KPT_NUM * 3) +
+                                     j * (5 + CLS_NUM + KPT_NUM * 3) + k];
+                    tp = sigmoid(tp);
+                    if (tp > max_prob)
+                        max_prob = tp, idx = k;
                 }
-                // cout<<b.pts_x.size()<<endl;
+                float cof = std::min(box_prob * max_prob, 1.0);
+                if (cof < CONF_THRESHOLD) continue;
+
+                //xywh的后处理(python 代码)
+                //xy = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                //wh = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i].view(1, self.na, 1, 1, 2)  # wh
+                x = (sigmoid(x) * 2 - 0.5 + j) * stride;
+                y = (sigmoid(y) * 2 - 0.5 + i) * stride;
+                w = pow(sigmoid(w) * 2, 2) * anchors[anchor_group * 6 + anchor * 2];
+                h = pow(sigmoid(h) * 2, 2) * anchors[anchor_group * 6 + anchor * 2 + 1];
+                //将中心点变为左上点，转换为OpenCV rect类型
+                float r_x = x - w / 2;
+                float r_y = y - h / 2;
+                Object obj;
+                obj.rect.x = r_x;
+                obj.rect.y = r_y;
+                obj.rect.width = w;
+                obj.rect.height = h;
+                obj.label = idx - 5;
+                obj.prob = cof;
+                if (KPT_NUM != 0)
+                    for (int k = 0; k < KPT_NUM; k++)
+                        if (k != 2 && kptx[k] > r_x && kptx[k] < r_x + w && kpty[k] > r_y && kpty[k] < r_y + h)
+                            obj.kpt.push_back(cv::Point2f(kptx[k], kpty[k]));
+                        else if (k == 2)
+                            obj.kpt.push_back(cv::Point2f(kptx[k], kpty[k]));
+                        else
+                            obj.kpt.push_back(cv::Point2f(0, 0));
+                objects.push_back(obj);
             }
         }
-        if (keep)
-            picked.push_back(i);
     }
 }
 
-static void decodeOutputs(const float *prob, std::vector<BuffObject> &objects,
-                          Eigen::Matrix<float, 3, 3> &transform_matrix, const int img_w, const int img_h) {
-    std::vector<BuffObject> proposals;
-    std::vector<int> strides = {8, 16, 32}; //神经网络anchor的步长
-    std::vector<GridAndStride> grid_strides;
 
-    generate_grids_and_stride(INPUT_W, INPUT_H, strides, grid_strides);
-    generateYoloxProposals(grid_strides, prob, transform_matrix, BBOX_CONF_THRESH, proposals);
-    qsort_descent_inplace(proposals);
-
-    if (proposals.size() >= TOPK)
-        proposals.resize(TOPK);
+std::vector<buff_kpt::Object> buff_kpt::work(cv::Mat src_img) {
+     int img_h = IMG_SIZE;
+    int img_w = IMG_SIZE;
+    cv::Mat img;
+    std::vector<float> padd;
+    cv::Mat boxed = letter_box(src_img, img_h, img_w, padd);
+    cv::cvtColor(boxed, img, cv::COLOR_BGR2RGB);
+    auto data1 = input_tensor1.data<float>();
+    for (int h = 0; h < img_h; h++) {
+        for (int w = 0; w < img_w; w++) {
+            for (int c = 0; c < 3; c++) {
+                int out_index = c * img_h * img_w + h * img_w + w;
+                data1[out_index] = float(img.at<cv::Vec3b>(h, w)[c]) / 255.0f;
+            }
+        }
+    }
+//    infer_request.infer(); //推理并获得三个提取头
+    infer_request.start_async();
+    infer_request.wait();
+    auto output_tensor_p8 = infer_request.get_output_tensor(0);
+    const float *result_p8 = output_tensor_p8.data<const float>();
+    auto output_tensor_p16 = infer_request.get_output_tensor(1);
+    const float *result_p16 = output_tensor_p16.data<const float>();
+    auto output_tensor_p32 = infer_request.get_output_tensor(2);
+    const float *result_p32 = output_tensor_p32.data<const float>();
+    std::vector<Object> proposals;
+    std::vector<Object> objects8;
+    std::vector<Object> objects16;
+    std::vector<Object> objects32;
+    generate_proposals(8, result_p8, objects8);
+    proposals.insert(proposals.end(), objects8.begin(), objects8.end());
+    generate_proposals(16, result_p16, objects16);
+    proposals.insert(proposals.end(), objects16.begin(), objects16.end());
+    generate_proposals(32, result_p32, objects32);
+    proposals.insert(proposals.end(), objects32.begin(), objects32.end());
+    std::vector<int> classIds;
+    std::vector<float> confidences;
+    std::vector<cv::Rect> boxes;
+    std::vector<cv::Point2f> points;
+    for (size_t i = 0; i < proposals.size(); i++) {
+        classIds.push_back(proposals[i].label);
+        confidences.push_back(proposals[i].prob);
+        boxes.push_back(proposals[i].rect);
+        for (auto ii: proposals[i].kpt)
+            points.push_back(ii);
+    }
     std::vector<int> picked;
-    nms_sorted_bboxes(proposals, picked, NMS_THRESH);
-    int count = picked.size();
-    objects.resize(count);
+    std::vector<float> picked_useless; //SoftNMS
+    std::vector<Object> object_result;
 
-    for (int i = 0; i < count; i++) {
-        objects[i] = proposals[picked[i]];
-    }
-}
+    //SoftNMS 要求OpenCV>=4.6.0
+//    cv::dnn::softNMSBoxes(boxes, confidences, picked_useless, CONF_THRESHOLD, NMS_THRESHOLD, picked);
+    cv::dnn::NMSBoxes(boxes, confidences, CONF_THRESHOLD, NMS_THRESHOLD, picked);
+    for (size_t i = 0; i < picked.size(); i++) {
+        cv::Rect scaled_box = scale_box(boxes[picked[i]], padd, src_img.cols, src_img.rows);
+        std::vector<cv::Point2f> scaled_point;
+        if (KPT_NUM != 0)
+            scaled_point = scale_box_kpt(points, padd, src_img.cols, src_img.rows, picked[i]);
+        Object obj;
+        obj.rect = scaled_box;
+        obj.label = classIds[picked[i]];
+        obj.prob = confidences[picked[i]];
+        if (KPT_NUM != 0)
+            obj.kpt = scaled_point;
+        
+        float x0 = scaled_box.x;
+        float y0 = scaled_box.y;
+        float x1 = scaled_box.x + scaled_box.width;
+        float y1 = scaled_box.y + scaled_box.height;
 
-BuffDetector::BuffDetector() //没写完？
-{
-}
-
-BuffDetector::~BuffDetector() {
-}
-
-
-bool BuffDetector::initModel(string path)  //神经网络载入函数
-{
-    ie.SetConfig({{CONFIG_KEY(CACHE_DIR), "../.cache"}});
-    // ie.SetConfig({{CONFIG_KEY(GPU_THROUGHPUT_STREAMS),"GPU_THROUGHPUT_AUTO"}});
-    if (!FOR_PC)
-        ie.SetConfig({{CONFIG_KEY(GPU_THROUGHPUT_STREAMS), "1"}});
-    // Step 1. Read a model in OpenVINO Intermediate Representation (.xml and
-    // .bin files) or ONNX (.onnx file) format
-    network = ie.ReadNetwork(path);
-    if (network.getOutputsInfo().size() != 1)
-        throw std::logic_error("Sample supports topologies with 1 output only");
-
-    // Step 2. Configure input & output
-    //  Prepare input blobs
-    InputInfo::Ptr input_info = network.getInputsInfo().begin()->second;
-    input_name = network.getInputsInfo().begin()->first;
-
-
-    //  Prepare output blobs
-    if (network.getOutputsInfo().empty()) {
-        std::cerr << "Network outputs info is empty" << std::endl;
-        return EXIT_FAILURE;
-    }
-    DataPtr output_info = network.getOutputsInfo().begin()->second;
-    output_name = network.getOutputsInfo().begin()->first;
-
-    // output_info->setPrecision(Precision::FP16);
-    // Step 3. Loading a model to the device
-    // executable_network = ie.LoadNetwork(network, "MULTI:GPU");
-    if (FOR_PC)
-        executable_network = ie.LoadNetwork(network, "CPU");
-    else
-        executable_network = ie.LoadNetwork(network, "GPU");
-
-
-    // Step 4. Create an infer request
-    infer_request = executable_network.CreateInferRequest();
-    const Blob::Ptr output_blob = infer_request.GetBlob(output_name);
-    moutput = as<MemoryBlob>(output_blob);
-    // Blob::Ptr input = infer_request.GetBlob(input_name);     // just wrap Mat data by Blob::Ptr
-    if (!moutput) {
-        throw std::logic_error("We expect output to be inherited from MemoryBlob, "
-                               "but by fact we were not able to cast output to MemoryBlob");
-    }
-    // locked memory holder should be alive all time while access to its buffer
-    // happens
-    return true;
-}
-
-bool BuffDetector::detect(Mat &src, vector<BuffObject> &objects, Robotstatus &robotstatus) //主函数
-{
-    if (src.empty()) {
-        return false;
-    }
-
-    cv::Mat pr_img = scaledResize(src, transfrom_matrix); //先缩放，后分离通道
-    cv::Mat pre;
-    cv::Mat pre_split[3];
-    pr_img.convertTo(pre, CV_32F);  //转换深度，不知道是干啥的，感觉没有也能运行
-    cv::split(pre, pre_split);   //分离通道
-
-    Blob::Ptr imgBlob = infer_request.GetBlob(
-            input_name);  //blob是按C风格连续存储的N维数组,神经网络的数据结构 just wrap Mat data by Blob::Ptr
-    InferenceEngine::MemoryBlob::Ptr mblob = InferenceEngine::as<InferenceEngine::MemoryBlob>(imgBlob);
-    // locked memory holder should be alive all time while access to its buffer happens
-    auto mblobHolder = mblob->wmap();
-    float *blob_data = mblobHolder.as<float *>();
-
-    auto img_offset = INPUT_W * INPUT_H;
-    //Copy img into blob
-    for (int c = 0; c < 3; c++) {
-        memcpy(blob_data, pre_split[c].data, INPUT_W * INPUT_H * sizeof(float));
-        blob_data += img_offset;
-    }
-    infer_request.Infer(); //神经网络推理
-    // -----------------------------------------------------------------------------------------------------
-    // --------------------------- Step 8. Process output----------------
-    // const Blob::Ptr output_blob = infer_request.GetBlob(output_name);
-    // MemoryBlob::CPtr moutput = as<MemoryBlob>(output_blob);
-
-    auto moutputHolder = moutput->rmap();
-    const float *net_pred = moutputHolder.as<const PrecisionTrait<Precision::FP32>::value_type *>();
-
-    int img_w = src.cols; //640
-    int img_h = src.rows; //384
-    decodeOutputs(net_pred, objects, transfrom_matrix, img_w, img_h);
-    for (auto object = objects.begin(); object != objects.end(); ++object) {
-        if ((*object).pts.size() >= 10) {
-            auto N = (*object).pts.size();
-            cv::Point2f pts_final[5];
-
-            for (int i = 0; i < N; i++) {
-                pts_final[i % 5] += (*object).pts[i];
-            }
-
-            for (int i = 0; i < 5; i++) {
-                pts_final[i].x = pts_final[i].x / (N / 5);
-                pts_final[i].y = pts_final[i].y / (N / 5);
-            }
-
-            (*object).apex[0] = pts_final[0];
-            (*object).apex[1] = pts_final[1];
-            (*object).apex[2] = pts_final[2];
-            (*object).apex[3] = pts_final[3];
-            (*object).apex[4] = pts_final[4];
-            if (DEBUG) {
-                for (int i = 0; i < 5; i++) {
-                    cout << (*object).apex[i] << endl;
-                }
-                circle(src, (*object).apex[0], 2, Scalar(255, 0, 0), 10);
-                circle(src, (*object).apex[1], 2, Scalar(0, 255, 0), 10);
-                circle(src, (*object).apex[2], 2, Scalar(0, 0, 255), 10);
-                circle(src, (*object).apex[3], 2, Scalar(255, 255, 0), 10);
-                circle(src, (*object).apex[4], 2, Scalar(255, 255, 255), 10);
-
-                imshow("dst", src);
-                waitKey(1);
+        cv::Point2f keypoints_center(0, 0);
+        std::vector<bool> valid_keypoints(5, false);
+        for (int i = 0; i < scaled_point.size(); i++) 
+        {
+            if (i != 2 && scaled_point[i].x != 0 && scaled_point[i].y != 0) 
+            {
+                valid_keypoints[i] = true;
             }
         }
-        // (*object).area = (int)(calcTetragonArea((*object).apex));
-    }
-    if (objects.size() != 0)
-        return true;
-    else
-        return false;
+        keypoints_center = cv::Point2f(x0 + scaled_box.width / 2, y0 + scaled_box.height / 2);
+        obj.center = keypoints_center;
+        obj.center_R = scaled_point[2];
+        if(obj.label % 2 == 0)
+        {
+        object_result.push_back(obj);
+        drawPred(classIds[picked[i]], confidences[picked[i]], scaled_box, scaled_point, src_img,
+                    class_names);
+        }
 
+    }
+    //cv::imshow("Inference frame", src_img);
+    //cv::waitKey(1);
+    return object_result;
 }

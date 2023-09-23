@@ -119,6 +119,19 @@ struct Predict {
     double delta_t;
 };
 
+struct Antitop_Delay
+{
+    template<class T>
+    void operator()(const T x0[5],T x1[5],T k)
+    {
+        x1[0] = x0[0];
+        x1[1] = x0[1] * k;
+        x1[2] = x0[2];
+        x1[3] = x0[3] * k;
+        x1[4] = x0[4];
+    }
+};
+
 template<class T>
 void xyz2pyd(T xyz[3], T pyd[3]) {
     /*
@@ -172,7 +185,8 @@ public:
         }
         ~ROI() = default;
     };
-
+    double get_yaw_offset()
+    {return yaw_offset;}
 
     Detection_package package_get;
 
@@ -194,7 +208,9 @@ public:
     cv::Mat C_MAT;                  // 相机畸变矩阵CV-Mat
 
     armor_detect_yolo yolo;
+    yolo_kpt kpt;
     vector<armor_detect_yolo::Object> Object;
+    vector<yolo_kpt::Object> Object_new;
     AdaptiveEKF<5, 3> ekf;  // 创建ekf
     Kalman kalman;
 
@@ -209,9 +225,12 @@ public:
     double last_yaw;
 
     double Delta_T;
+    bool is_antitop;
 
     Trajectory trajectory;
     float bullet_speed;
+
+    float yaw_offset{};
 
     Armor last_armor;
 
