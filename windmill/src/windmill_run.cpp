@@ -195,6 +195,8 @@ bool BUFF::run(Robotstatus &status,RobotCMD &cmd,cv::Mat img_src)
     last_timestamp = time_end;
     last_objects = objects;
 
+    
+
     return true;
 }
 
